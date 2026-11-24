@@ -5,6 +5,11 @@ adapted to a different Philips TV and firmware family. All of the design, the
 custom Home UI and the original method are the upstream author's work. This
 fork changes only what was needed to make it run on the model below.
 
+![The custom Home with the optional Gira controls: temperature in the top bar, light and blind buttons in the bottom row](docs/home-screenshot.jpg)
+
+*Browser preview with example data (sample apps and device, simulated Gira
+values). On the TV it shows your own apps, inputs and smart-home state.*
+
 > **Tested on exactly one TV:**
 > **Philips 43PUS7855/12**, software **TPM206E_201.003.248.001**
 > (MediaTek MT5806, 2020 SAPHI platform, browser = Chrome 55).
