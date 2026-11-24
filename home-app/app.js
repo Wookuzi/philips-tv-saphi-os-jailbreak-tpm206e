@@ -2,10 +2,18 @@
 var HomeData = (function () {
     var names = ['Fajr','Dhuhr','Asr','Maghrib','Isha'];
     function pad(n) {return n < 10 ? '0' + n : String(n);}
-    function local(now) {return new Date(now + HomeConfig.utcOffsetMinutes * 60000);}
+    // Optional EU summer time: +60 min from the last Sunday of March to the last
+    // Sunday of October, both at 01:00 UTC (the EU-wide switch instant).
+    function lastSunday(year, month) {var d=Date.UTC(year,month+1,0);return d-new Date(d).getUTCDay()*86400000+3600000;}
+    function offset(now) {
+        var minutes=HomeConfig.utcOffsetMinutes||0;
+        if (HomeConfig.euSummerTime) {var y=new Date(now).getUTCFullYear();if (now>=lastSunday(y,2)&&now<lastSunday(y,9)) minutes+=60;}
+        return minutes;
+    }
+    function local(now) {return new Date(now + offset(now) * 60000);}
     function dateKey(now) {var d=local(now);return d.getUTCFullYear()+'-'+pad(d.getUTCMonth()+1)+'-'+pad(d.getUTCDate());}
     function monthKey(now) {return dateKey(now).slice(0,7);}
-    function nextMonth(now) {var d=local(now);return Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1)-HomeConfig.utcOffsetMinutes*60000;}
+    function nextMonth(now) {var d=local(now);return Date.UTC(d.getUTCFullYear(),d.getUTCMonth()+1,1)-offset(now)*60000;}
     function time(value) {var m=/^([01]\d|2[0-3]):([0-5]\d)(?:\s|$)/.exec(String(value || ''));return m ? m[1]+':'+m[2] : null;}
     function validDay(day) {return day && names.every(function (name) {return typeof day[name]==='string' && time(day[name]) === day[name];});}
     function calendar(rows, month) {
@@ -408,7 +416,7 @@ function HomeAtmosphere() {
     document.addEventListener("keydown", onKey);
     function clock() {
         var now = HomeData.local(Date.now()), hour = now.getUTCHours(), minute=now.getUTCMinutes();
-        document.getElementById("clock").textContent = (hour%12||12)+':'+(minute<10?'0':'')+minute+(hour<12?' AM':' PM');
+        document.getElementById("clock").textContent = HomeConfig.clock24h ? (hour<10?'0':'')+hour+':'+(minute<10?'0':'')+minute : (hour%12||12)+':'+(minute<10?'0':'')+minute+(hour<12?' AM':' PM');
         document.getElementById('date').textContent = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][now.getUTCDay()]+', '+['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][now.getUTCMonth()]+' '+now.getUTCDate();
         document.getElementById('greeting').textContent = hour < 5 ? 'WELCOME HOME' : hour < 12 ? 'GOOD MORNING' : hour < 17 ? 'GOOD AFTERNOON' : 'GOOD EVENING';
     }
@@ -437,9 +445,130 @@ function HomeAtmosphere() {
     var atmosphere=new HomeAtmosphere();
     var uiTimers=new HomeIntervals([{run:function () {if(!atmosphere.busy())clock();},delay:30000},{run:function () {refreshDevices(false);},delay:5000}]);
     document.getElementById('change-scene').addEventListener('click',atmosphere.newScene);
+    // Optional smart-home controls (Gira X1 via gira_bridge.py on a computer).
+    // Configured only in the private config.local.js (smartHome: bridge, lights,
+    // blinds, climate). Temperatures are display-only by design.
+    var smart = HomeConfig.smartHome, smartValues = {}, smartRequests = [], smartTimer = null, smartConfirm = null;
+    var BULB = '<svg class="svg-icon" viewBox="0 0 24 24" width="27" height="27"><g fill="none" stroke="currentColor" stroke-width="1.6"><path d="M9 17.5h6M10 20.5h4M12 3a6 6 0 0 0-3.6 10.8c.7.5 1.1 1.3 1.1 2.2v.5h5v-.5c0-.9.4-1.7 1.1-2.2A6 6 0 0 0 12 3z"/></g></svg>';
+    var SUN = '<svg class="svg-icon" viewBox="0 0 24 24" width="27" height="27"><g fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2.5M12 19v2.5M2.5 12H5M19 12h2.5M5.3 5.3l1.8 1.8M16.9 16.9l1.8 1.8M5.3 18.7l1.8-1.8M16.9 7.1l1.8-1.8"/></g></svg>';
+    var BLIND = '<svg class="svg-icon" viewBox="0 0 24 24" width="27" height="27"><g fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="3" width="16" height="18" rx="1.5"/><path d="M4 7.5h16M4 11h16M4 14.5h16M12 21v-3"/></g></svg>';
+    var THERMO = '<svg class="svg-icon" viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="1.6"><path d="M10 14.5V5a2 2 0 0 1 4 0v9.5a4 4 0 1 1-4 0z"/><path d="M12 9v7"/></g></svg>';
+    function smartList() {
+        var all = [];
+        (smart.lights || []).forEach(function (l) {all.push(l.dp); if (l.brightness) all.push(l.brightness);});
+        (smart.blinds || []).forEach(function (b) {if (b.position) all.push(b.position); if (b.slat) all.push(b.slat);});
+        if (smart.climate) {if (smart.climate.current) all.push(smart.climate.current); if (smart.climate.setpoint) all.push(smart.climate.setpoint);}
+        return all;
+    }
+    function smartCall(path, dps, extra, done) {
+        var r = new XMLHttpRequest(); smartRequests.push(r);
+        function finish(values) {
+            var i = smartRequests.indexOf(r); if (i >= 0) smartRequests.splice(i, 1);
+            r.onload = r.onerror = r.ontimeout = null;
+            if (destroyed) return;
+            if (values) for (var k in values) if (values.hasOwnProperty(k)) smartValues[k] = values[k];
+            renderSmart(!values);
+            if (done) done(!!values);
+        }
+        r.open('GET', smart.bridge.replace(/\/$/, '') + path + '?dp=' + encodeURIComponent(dps.join(',')) + (extra || '') + '&t=' + Date.now(), true);
+        r.timeout = 6000;
+        r.onload = function () {var v = null; try {if (r.status === 200) v = JSON.parse(r.responseText).values;} catch (e) {} finish(v);};
+        r.onerror = r.ontimeout = function () {finish(null);};
+        r.send();
+    }
+    function smartRefresh() {if (!document.hidden && !destroyed) smartCall('/state', smartList());}
+    function smartWrite(path, dp, value) {
+        smartCall(path, [dp], value === undefined ? '' : '&value=' + value, function (ok) {
+            if (!ok) notify('The smart-home bridge on the computer is not reachable.');
+            // Read back once KNX has settled, so the screen matches the room.
+            clearTimeout(smartConfirm); smartConfirm = setTimeout(smartRefresh, 2500);
+        });
+    }
+    function num(dp) {var v = smartValues[dp]; return typeof v === 'number' ? v : null;}
+    function pct(v) {return v === null ? '–' : Math.round(v) + '%';}
+    function lightOn(l) {var on = num(l.dp); if (on === null && l.brightness) on = num(l.brightness); return on === null ? null : on > 0;}
+    function renderSmart(offline) {
+        Array.prototype.forEach.call(document.querySelectorAll('[data-smart]'), function (b) {
+            var parts = b.getAttribute('data-smart').split(':'), item, label;
+            if (parts[0] === 'light') {
+                item = smart.lights[Number(parts[1])];
+                var on = lightOn(item), level = item.brightness ? num(item.brightness) : null;
+                b.className = 'smart-button' + (on ? ' light-on' : '') + (on === null ? ' smart-unknown' : '');
+                label = on === null ? (offline ? 'offline' : '…') : on ? 'On' + (level !== null && level > 0 ? ' · ' + Math.round(level) + '%' : '') : 'Off';
+            } else if (parts[0] === 'dim') {
+                item = smart.lights[Number(parts[1])];
+                label = pct(num(item.brightness));
+            } else {
+                item = smart.blinds[Number(parts[1])];
+                label = pct(num(item.position)) + ' · ' + pct(num(item.slat));
+            }
+            b.querySelector('.smart-state').textContent = label;
+        });
+        var climate = document.getElementById('climate');
+        if (climate && smart.climate) {
+            var cur = num(smart.climate.current), set = num(smart.climate.setpoint);
+            climate.querySelector('.climate-now').textContent = cur === null ? '–' : cur.toFixed(1) + '°';
+            climate.querySelector('.climate-set').textContent = set === null ? '' : 'set ' + set.toFixed(1) + '°';
+        }
+    }
+    function smartButton(kind, index, icon, name) {
+        var b = document.createElement('button');
+        b.setAttribute('data-row', '3'); b.setAttribute('data-smart', kind + ':' + index); b.className = 'smart-button';
+        b.innerHTML = '<span class="line-icon" aria-hidden="true">' + icon + '</span><span class="smart-name"></span><span class="smart-state">…</span>';
+        b.querySelector('.smart-name').textContent = name;
+        document.querySelector('.essentials-row').appendChild(b);
+        return b;
+    }
+    function brightnessDialog(light) {
+        openDialog(light.name + ' brightness', 'Now: ' + (lightOn(light) ? pct(num(light.brightness)) : 'off'), 'smart');
+        [100, 75, 50, 25, 10].forEach(function (v) {addOption(v + '%', function () {closeDialog(); smartWrite('/set', light.brightness, v);});});
+        addOption('Off', function () {closeDialog(); smartWrite('/set', light.dp, 0);});
+        focusFirst();
+    }
+    function blindDialog(blind) {
+        openDialog(blind.name, 'Now: height ' + pct(num(blind.position)) + ' closed · tilt ' + pct(num(blind.slat)), 'smart');
+        if (blind.upDown) {
+            addOption('Open fully (up)', function () {closeDialog(); smartWrite('/set', blind.upDown, 0);});
+            addOption('Close fully (down)', function () {closeDialog(); smartWrite('/set', blind.upDown, 1);});
+        }
+        if (blind.stop) addOption('Stop', function () {closeDialog(); smartWrite('/set', blind.stop, 1);});
+        if (blind.position) [0, 25, 50, 75, 100].forEach(function (v) {
+            addOption('Height ' + v + '% closed', function () {closeDialog(); smartWrite('/set', blind.position, v);});
+        });
+        if (blind.slat) [0, 25, 50, 75, 100].forEach(function (v) {
+            addOption('Tilt ' + v + '%', function () {closeDialog(); smartWrite('/set', blind.slat, v);});
+        });
+        focusFirst();
+    }
+    function smartVisible() {
+        if (document.hidden) {clearInterval(smartTimer); smartTimer = null; return;}
+        smartRefresh();
+        if (smartTimer === null) smartTimer = setInterval(smartRefresh, 20000);
+    }
+    if (smart && smart.bridge) {
+        (smart.lights || []).forEach(function (light, i) {
+            smartButton('light', i, BULB, light.name).addEventListener('click', function () {smartWrite('/toggle', light.dp);});
+            if (light.brightness) smartButton('dim', i, SUN, '').addEventListener('click', function () {brightnessDialog(light);});
+        });
+        (smart.blinds || []).forEach(function (blind, i) {
+            smartButton('blind', i, BLIND, blind.name).addEventListener('click', function () {blindDialog(blind);});
+        });
+        if (smart.climate) {
+            var c = document.createElement('span');
+            c.id = 'climate';
+            c.innerHTML = THERMO + '<span class="climate-now">–</span><span class="climate-set"></span>';
+            var header = document.querySelector('.header-right');
+            header.insertBefore(c, header.firstChild);
+        }
+        document.addEventListener('visibilitychange', smartVisible);
+        smartVisible();
+    }
     window.HomeApp = {performance:function () {performanceStats.uiTimers=uiTimers.count();return performanceStats;},inspect:atmosphere.inspect,apps:function () {return catalog.map(function (a) {return a.name;});},connected:function () {return connected;}, refreshDevices:refreshDevices, destroy:function () {
         destroyed=true;atmosphere.destroy();uiTimers.destroy();cancelAppRefresh();document.removeEventListener('focus',reveal,true);
         clearTimeout(noticeTimer);
+        document.removeEventListener('visibilitychange', smartVisible);
+        clearInterval(smartTimer); clearTimeout(smartConfirm);
+        smartRequests.splice(0).forEach(function (r) {r.onload = r.onerror = r.ontimeout = null; r.abort();});
         document.removeEventListener('keydown',onKey); document.removeEventListener('visibilitychange',restore);
         window.removeEventListener('focus',restore); window.removeEventListener('resize',fit);
     }};

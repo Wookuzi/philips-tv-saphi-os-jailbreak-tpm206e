@@ -14,7 +14,7 @@ function environment(backupStatus = 200) {
     location:{protocol:'file:',pathname:'/3rd/html5/php/dash/index.html',reload(){context.reloaded=true;}},
     localStorage:{getItem:key=>storage.has(key)?storage.get(key):null,setItem:(key,value)=>storage.set(key,String(value)),removeItem:key=>storage.delete(key)},
     Image:function(){}, setTimeout:callback=>callback(),
-    XMLHttpRequest:function(){this.open=()=>{};this.setRequestHeader=()=>{};this.send=data=>{context.backup=data;this.status=backupStatus;this.onload();};}
+    XMLHttpRequest:function(){this.open=m=>{this.method=m;};this.setRequestHeader=()=>{};this.send=data=>{if(this.method!=='POST'){this.status=200;return;}context.backup=data;this.status=backupStatus;if(this.onload)this.onload();};}
   };
   context.window=context;
   context.__nativeHomeInstall={base:'http://192.0.2.1/fixture',runtime:'window.runtimeExecuted = true;'};

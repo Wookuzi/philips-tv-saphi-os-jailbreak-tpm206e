@@ -4,7 +4,20 @@
     var pendingImages = [], pollTimer = null, promotionTimer = null, pollDelay = 3000, disposed = false;
     var promotionCost = {calls:0,lastMs:0,maxMs:0};
     var homePressed = false, homeNavigation = {dismissals:0,repeats:0};
+    // TPM206E: also keep a log in TV storage, so problems can be read back
+    // through the DLNA page even when the Home page cannot reach the computer.
+    function storeLog(data) {
+        try {
+            var log = JSON.parse(localStorage.getItem('compact-home.log.v1') || '[]');
+            var text = JSON.stringify(data);
+            if (text.length > 1500) text = text.slice(0, 1500);
+            log.push(Date.now() + ' ' + text);
+            if (log.length > 80) log = log.slice(log.length - 80);
+            localStorage.setItem('compact-home.log.v1', JSON.stringify(log));
+        } catch (e) {}
+    }
     function report(data) {
+        storeLog(data);
         if (pendingImages.length>=8) return;
         var image = new Image();
         pendingImages.push(image);
@@ -13,11 +26,20 @@
             clearTimeout(expiry);image.onload=image.onerror=null;
             var i = pendingImages.indexOf(image); if (i >= 0) pendingImages.splice(i, 1);
         }
-        image.onload = image.onerror = done;
+        image.onload = done;
+        image.onerror = function () {
+            if (!report.networkFailed) {report.networkFailed = true; storeLog({event:'report-network-failed', base:config.base});}
+            done();
+        };
         image.src = config.base + '/event?data=' + encodeURIComponent(JSON.stringify(data));
     }
-    if (location.protocol !== 'file:' || location.pathname !== '/3rd/html5/php/dash/index.html' || typeof TV_JSP !== 'function') {
-        report({event:'wrong-context', path:location.pathname, width:innerWidth, bridge:typeof TV_JSP});
+    // TPM206E: getTvJspService() is flat (no .utility/.tvServices/.mmpServices).
+    function nhSvc() {var s = getTvJspService(); return s && (s.tvServices || s.utility || s.mmpServices) ? s : {utility:s, tvServices:s, mmpServices:s};}
+    var flatService = false;
+    try {var probeSvc = getTvJspService(); flatService = !(probeSvc && (probeSvc.tvServices || probeSvc.utility || probeSvc.mmpServices));} catch (e) {}
+    report({event:'session-start', path:location.pathname, flatService:flatService, at:Date.now()});
+    if (location.protocol !== 'file:' || location.pathname !== '/3rd/html5/php/dash/index.html' || (typeof TV_JSP !== 'function' && typeof getTvJspService !== 'function')) {
+        report({event:'wrong-context', path:location.pathname, width:innerWidth, bridge:typeof getTvJspService});
         return;
     }
     if (window.NativeHome) window.NativeHome.restore(false);
@@ -43,10 +65,10 @@
     function hidePromotion(prepare) {
         var start=Date.now();
         try {
-            var service = getTvJspService().tvServices;
+            var service = nhSvc().tvServices;
             // The content script is only needed on entry; the native hide
             // guard remains active without resending that script every second.
-            if(prepare)service.advMsg('smallAdv', 'SEND_EVENT ' + adStyleScript);
+            if(prepare && !flatService)service.advMsg('smallAdv', 'SEND_EVENT ' + adStyleScript);
             service.advMsg('smallAdv', 'HIDE_WIN ');
             if (typeof Ads_STATE_WINDOW_OPEN_HIDE !== 'undefined') window.current_Ads_state = Ads_STATE_WINDOW_OPEN_HIDE;
         } catch (e) {report({event:'promotion-error', message:String(e)});}
@@ -145,7 +167,7 @@
         delete window.NativeHome;
         report({event:'restored'});
         if (showStock !== false) {
-            try {getTvJspService().tvServices.advMsg('smallAdv', 'SEND_EVENT var s=document.getElementById("compact-home-hide-ad");if(s)s.parentNode.removeChild(s);');} catch(e) {}
+            try {nhSvc().tvServices.advMsg('smallAdv', 'SEND_EVENT var s=document.getElementById("compact-home-hide-ad");if(s)s.parentNode.removeChild(s);');} catch(e) {}
             var backup = localStorage.getItem('compact-home.stock-menu.v1');
             localStorage.removeItem('compact-home.enabled.v1');
             if (backup) {
@@ -165,7 +187,7 @@
         if (!value) return;
         try {
             if (value.action === 'key') dispatch(value.code);
-            else if (value.action === 'remote-home') getTvJspService().utility.sendKeyIRRC('MENU');
+            else if (value.action === 'remote-home') nhSvc().utility.sendKeyIRRC('MENU');
             else if (value.action === 'show') {
                 show();
             } else if (value.action === 'restore') {restore(true);return;}
@@ -189,11 +211,20 @@
     document.open();
     document.write(config.html);
     document.close();
+    report({event:'document-written', htmlBytes:config.html.length});
+    window.addEventListener('error', function (e) {storeLog({event:'page-error', message:String(e.message), line:e.lineno, file:String(e.filename).slice(-80)});});
     // The native ad process can show its window after the dashboard's own
     // visibility callback. Keep it hidden while this Home is on screen.
     syncPromotionGuard();
     setTimeout(function () {
         if(disposed)return;
+        try {
+            var doc = document, home = doc.getElementById('home'), body = doc.body;
+            report({event:'render-check', bodyVisibility:body ? getComputedStyle(body).visibility : null,
+                htmlVisibility:getComputedStyle(doc.documentElement).visibility,
+                homeHeight:home ? home.clientHeight : null, homeWidth:home ? home.clientWidth : null,
+                styles:doc.styleSheets.length, hidden:doc.hidden, buttons:doc.querySelectorAll('button').length});
+        } catch(e) {report({event:'render-check-error', message:String(e)});}
         try { focus(); inspect(); report({event:'ready', native:HomeTV.live, saved:localStorage.getItem('compact-home.enabled.v1')==='1', rendering:'direct-document'}); }
         catch(e) {report({event:'error', message:String(e)});}
     }, 300);

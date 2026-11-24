@@ -9,7 +9,9 @@ var HomeTV = (function () {
             host = window.parent; session = true;
         }
     } catch (e) {}
-    var live = host.location.protocol === "file:" && host.location.pathname === "/3rd/html5/php/dash/index.html" && typeof host.TV_JSP === "function";
+    var live = host.location.protocol === "file:" && host.location.pathname === "/3rd/html5/php/dash/index.html" && (typeof host.TV_JSP === "function" || typeof host.getTvJspService === "function");
+    // TPM206E: getTvJspService() is flat (no .utility/.tvServices/.mmpServices).
+    function nhSvc() {var s = host.getTvJspService(); return s && (s.tvServices || s.utility || s.mmpServices) ? s : {utility:s, tvServices:s, mmpServices:s};}
     var inputs = null, installed = {}, registryLoaded = false;
     var builtin = {'4823':'youtube','5048':'netflix','5443':'OpenInternet','20004340':'OpenInternet',
         '3059':'appGallery','20004337':'appGallery','20004317':'SmartTVHome','20004342':'SmartTVHome',
@@ -97,7 +99,7 @@ var HomeTV = (function () {
         } catch(e) {}
         // The native mount list contains only USB media currently present.
         try {
-            var service = host.getTvJspService().mmpServices;
+            var service = nhSvc().mmpServices;
             var mounted = service && service.getMountPointList('');
             var mounts = mounted ? JSON.parse(mounted).ITEMS : [];
             if (mounts && mounts.length) {
@@ -123,12 +125,12 @@ var HomeTV = (function () {
             var url = app.nativeName === 'Null' ? app.url : 'Null';
             if (url !== 'Null' && !/^https?:\/\//.test(url)) throw new Error('This app uses an unsupported launch method.');
             leave();
-            host.getTvJspService().tvServices.StartSmartTVApp(0, app.nativeName === 'Null' ? app.appID : 'Null', url, app.nativeName);
+            nhSvc().tvServices.StartSmartTVApp(0, app.nativeName === 'Null' ? app.appID : 'Null', url, app.nativeName);
             report("app", id);
         },
         settings: function () {
             requireNative();
-            host.getTvJspService().utility.startNativeApp(JSON.stringify({PARAMETER:{VALUE:"AllSettings",REQUEST:"MODIFY"}}));
+            nhSvc().utility.startNativeApp(JSON.stringify({PARAMETER:{VALUE:"AllSettings",REQUEST:"MODIFY"}}));
             leave();
             report("settings", true);
         },

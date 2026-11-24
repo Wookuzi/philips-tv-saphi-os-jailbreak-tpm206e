@@ -29,16 +29,16 @@ PIXEL = base64.b64decode('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRA
 
 
 def home_html():
-    template = (ROOT / 'home-app/index.html').read_text()
+    template = (ROOT / 'home-app/index.html').read_text(encoding='utf-8')
     template = template.replace('<!-- NATIVE_LIBRARIES -->', '')
     config_name = 'config.local.js' if (ROOT / 'home-app/config.local.js').exists() else 'config.js'
     for marker, name in [('/* APP_CONFIG */', config_name), ('/* APP_CSS */', 'app.css'), ('/* APP_BRIDGE */', 'bridge.js'), ('/* APP_JS */', 'app.js')]:
-        template = template.replace(marker, (ROOT / 'home-app' / name).read_text())
+        template = template.replace(marker, (ROOT / 'home-app' / name).read_text(encoding='utf-8'))
     return template
 
 
 def control(args):
-    state = json.loads(STATE.read_text())
+    state = json.loads(STATE.read_text(encoding='utf-8'))
     data = {'action': args.action}
     if args.action == 'key':
         data['code'] = KEYS[args.key]
@@ -52,10 +52,11 @@ def control(args):
 
 def launch(args):
     recover_only = args.action == 'recover'
+    logs_only = args.action == 'logs'
     # A second launch reuses a healthy helper. Never spawn competing sessions.
     if STATE.exists():
         try:
-            old = json.loads(STATE.read_text())
+            old = json.loads(STATE.read_text(encoding='utf-8'))
             http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             headers = {'Authorization':'Bearer '+old['control_token'],'Content-Type':'application/json'}
             request = urllib.request.Request(old['base']+'/status',headers=headers)
@@ -79,8 +80,15 @@ def launch(args):
                                        stdin=subprocess.DEVNULL,stdout=handle,stderr=subprocess.STDOUT,start_new_session=True)
         print('Helper started with PID '+str(process.pid)+'. Log: '+str(output));return
     tv = TV(args.tv)
-    if tv.name != '65PUT6703/56':
-        raise RuntimeError('Unexpected TV model: ' + str(tv.name))
+    # TPM206E adaptation: the target is 43PUS7855/12 on TPM206E_201.003.248.001.
+    print('Connected to TV: ' + str(tv.name), flush=True)
+    if tv.name != '43PUS7855/12':
+        raise RuntimeError('This copy is adapted for 43PUS7855/12, not ' + str(tv.name))
+    try:
+        tv.call('AVTransport', 'Stop', InstanceID=0)  # clear a leftover session (avoids 705 "transport locked")
+        time.sleep(1)
+    except Exception:
+        pass
     original = {'media':tv.call('AVTransport', 'GetMediaInfo', InstanceID=0),
                 'transport':tv.call('AVTransport', 'GetTransportInfo', InstanceID=0)}
     nonce = secrets.token_hex(4)
@@ -89,9 +97,11 @@ def launch(args):
              'started':datetime.now(timezone.utc).isoformat(), 'storage':'native browser localStorage', 'cold_boot_verified':False}
     directory = ROOT / 'build/native-home'
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / f'{nonce}-original.json').write_text(json.dumps(original, indent=2))
+    (directory / f'{nonce}-original.json').write_text(json.dumps(original, indent=2), encoding='utf-8')
     log = directory / f'{nonce}-events.jsonl'
     ready = threading.Event()
+    installed = threading.Event()
+    interrupted = [False]
     restored = threading.Event()
     stopping = threading.Event()
     last_poll = [0.0]
@@ -100,13 +110,16 @@ def launch(args):
     mp3 = (ROOT / 'native-home/silence.mp3').read_bytes()
     report = 'function report(d){var i=new Image();window.__nhReport=i;i.src=' + json.dumps(base+'/event?data=') + '+encodeURIComponent(JSON.stringify(d));}'
     def bootstrap(target):
-        other = "$.getScript(" + json.dumps(base+target) + ")"
-        return ('(function(){' + report + 'report({event:"bootstrap",path:location.pathname,width:innerWidth,bridge:typeof TV_JSP});'
-            'if(location.pathname==="/3rd/html5/php/dash/index.html"){' + other + ';}'
-            'else{getTvJspService().utility.notifyOpenUrl(JSON.stringify({URL:"file:///3rd/html5/php/dash/index.html",RESOLUTION:"1080P"}));setTimeout(function(){mtvuiUtil.sendPlatformMsg(' + json.dumps({'type':1,'value':{'msgType':'execute','value':other}}) + ');},1200);}}());').encode()
+        # TPM206E: the DLNA title renders on content_browser.html, whose storage is
+        # shared with the Home dashboard. A synchronous fetch + eval avoids the page
+        # being torn down before an async script arrives.
+        url = json.dumps(base + target)
+        return ('(function(){' + report + 'report({event:"bootstrap",path:location.pathname,width:innerWidth,bridge:typeof getTvJspService});'
+            'try{var r=new XMLHttpRequest;r.open("GET",' + url + ',false);r.send();(0,eval)(r.responseText);}'
+            'catch(e){report({event:"boot-error",message:String(e)});}}());').encode()
 
     def runtime():
-        return 'window.__nativeHomeConfig=' + json.dumps({'base':base,'html':home_html()}) + ';\n' + (ROOT / 'native-home/session.js').read_text()
+        return 'window.__nativeHomeConfig=' + json.dumps({'base':base,'html':home_html()}) + ';\n' + (ROOT / 'native-home/session.js').read_text(encoding='utf-8')
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -177,10 +190,14 @@ def launch(args):
             if path == '/boot.js':self.send(bootstrap('/install.js'),'application/javascript');return
             if path == '/restore-boot.js':self.send(bootstrap('/restore.js'),'application/javascript');return
             if path == '/install.js':
-                data = 'window.__nativeHomeInstall=' + json.dumps({'base':base,'runtime':runtime()}) + ';\n' + (ROOT / 'native-home/install.js').read_text()
+                data = 'window.__nativeHomeInstall=' + json.dumps({'base':base,'runtime':runtime()}) + ';\n' + (ROOT / 'native-home/install.js').read_text(encoding='utf-8')
+                self.send(data.encode(),'application/javascript');return
+            if path == '/logs-boot.js':self.send(bootstrap('/logs.js'),'application/javascript');return
+            if path == '/logs.js':
+                data = 'window.__nativeHomeLogsBase='+json.dumps(base)+';\n'+(ROOT/'native-home/logs.js').read_text(encoding='utf-8')
                 self.send(data.encode(),'application/javascript');return
             if path == '/restore.js':
-                data = 'window.__nativeHomeRestoreBase='+json.dumps(base)+';\n'+(ROOT/'native-home/restore.js').read_text()
+                data = 'window.__nativeHomeRestoreBase='+json.dumps(base)+';\n'+(ROOT/'native-home/restore.js').read_text(encoding='utf-8')
                 self.send(data.encode(),'application/javascript');return
             if path == '/home.js':
                 self.send(runtime().encode(),'application/javascript');return
@@ -197,10 +214,11 @@ def launch(args):
                     event = json.loads(value)
                     event['at'] = datetime.now(timezone.utc).isoformat()
                     events.append(event)
-                    with log.open('a') as output:output.write(json.dumps(event)+'\n')
+                    with log.open('a', encoding='utf-8') as output:output.write(json.dumps(event)+'\n')
                     print(json.dumps(event),flush=True)
                     if event.get('event') == 'ready' and event.get('native') is True:ready.set()
                     if event.get('event') == 'stock-restored':restored.set()
+                    if event.get('event') == 'installed':installed.set()
                 except (ValueError,TypeError):self.send_error(400);return
                 self.send(PIXEL,'image/gif');return
             if path == '/silence.mp3':
@@ -217,7 +235,7 @@ def launch(args):
             self.send_error(404)
 
     server = ThreadingHTTPServer((args.host,args.port),Handler)
-    STATE.write_text(json.dumps(state, indent=2));STATE.chmod(0o600)
+    STATE.write_text(json.dumps(state, indent=2), encoding='utf-8');STATE.chmod(0o600)
     threading.Thread(target=server.serve_forever,daemon=True).start()
     def activate(script):
         title = '<img src=x onerror="this.onerror=null;$.getScript(\'' + base + script + '\')">'
@@ -231,6 +249,13 @@ def launch(args):
         tv.call('AVTransport','Play',InstanceID=0,Speed='1')
     print(('Restoring Philips Home on ' if recover_only else 'Loading Compact Home on ')+tv.name+'; helper '+base,flush=True)
     try:
+        if logs_only:
+            activate('/logs-boot.js')
+            time.sleep(8)
+            try:tv.call('AVTransport','Stop',InstanceID=0)
+            except Exception:pass
+            print('Log read finished.',flush=True)
+            return
         if recover_only:
             activate('/restore-boot.js')
             confirmed = restored.wait(25)
@@ -240,18 +265,27 @@ def launch(args):
             print('Philips Home restored; the saved custom launcher is disabled.',flush=True)
             return
         activate('/boot.js')
-        confirmed = ready.wait(25)
-        tv.call('AVTransport','Stop',InstanceID=0)
-        time.sleep(1)
-        if confirmed:
-            queue.append({'id':'initial-show','action':'show'})
-            print('Native Home ready. Launcher configuration and UI are saved on the TV; cold-boot behavior is not yet verified.',flush=True)
+        saved = installed.wait(25)
+        try:tv.call('AVTransport','Stop',InstanceID=0)
+        except Exception:pass
+        if not saved:
+            print('Install was NOT confirmed (see install-error above, if any). Nothing to activate.',flush=True)
+            stopping.set()
         else:
-            print('Native Home has not confirmed readiness; diagnostics remain available.',flush=True)
-        stopping.wait()
+            print('Saved on the TV. Now press HOME on the remote: the custom Home should appear.',flush=True)
+            if ready.wait(180):
+                print('Custom Home is running on the TV. Keep this window open for reload/inspect, or press Ctrl+C to quit',flush=True)
+                print('(Ctrl+C keeps the custom Home installed; use "recover" to go back to Philips Home).',flush=True)
+            else:
+                print('No "ready" from the Home screen within 3 minutes. Press Ctrl+C and send the log.',flush=True)
+        while not stopping.is_set():stopping.wait(1)
     except KeyboardInterrupt:
-        pass
+        interrupted[0] = True
+        print('\nStopped. The custom Home stays installed on the TV.',flush=True)
     finally:
+        if interrupted[0] or not installed.is_set():
+            server.shutdown();server.server_close()
+            return
         if not recover_only:
             queue.append({'id':'shutdown','action':'restore'})
         if not recover_only and not restored.wait(2):
@@ -267,7 +301,7 @@ def launch(args):
 if __name__ == '__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     sub=parser.add_subparsers(dest='action',required=True)
-    for action in ('launch','recover'):
+    for action in ('launch','recover','logs'):
         start=sub.add_parser(action)
         start.add_argument('--tv',required=True,help='TV LAN address')
         start.add_argument('--host',required=True,help='Computer LAN address reachable by the TV')
@@ -276,5 +310,5 @@ if __name__ == '__main__':
     for action in ('status','show','inspect','restore','reload','remote-home','stop'):sub.add_parser(action)
     key=sub.add_parser('key');key.add_argument('key',choices=KEYS)
     args=parser.parse_args()
-    if args.action in ('launch','recover'):launch(args)
+    if args.action in ('launch','recover','logs'):launch(args)
     else:control(args)
